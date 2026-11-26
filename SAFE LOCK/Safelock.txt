@@ -1,0 +1,225 @@
+#include <xc.h>
+#include <string.h>
+
+#define _XTAL_FREQ 20000000
+
+// Configuration Bits (20 MHz Crystal)
+#pragma config FOSC = HS        // High-Speed Crystal (20 MHz)
+#pragma config WDTE = OFF       // Watchdog Timer Disabled
+#pragma config PWRTE = OFF      // Power-up Timer Disabled
+#pragma config BOREN = ON       // Brown-out Reset Enabled
+#pragma config LVP = OFF        // Low-Voltage Programming Disabled
+#pragma config CPD = OFF
+#pragma config WRT = OFF
+#pragma config CP = OFF
+
+// LCD Control Pins (PORTB) 
+#define RS PORTBbits.RB0
+#define RW PORTBbits.RB1
+#define EN PORTBbits.RB2
+
+// Motor Driver (L293D) Pins (Moved to RB3 & RB4 to avoid LCD conflict)
+#define MOTOR_A PORTBbits.RB3
+#define MOTOR_B PORTBbits.RB4
+
+// Password Configuration
+const char correct_pass[] = "1234";
+char entered_pass[5];
+int wrong_attempts = 0;
+
+// Function Prototypes
+void delay(unsigned int Delay);
+void lcd_cmd(unsigned char cmd);
+void lcd_data(unsigned char data);
+void lcd_Init(void);
+void lcd_word(const char *words);
+void UART_Init(void);
+void UART_Write_Char(char data);
+void UART_Write_Text(const char *text);
+char UART_Read_Char(void);
+
+void main(void)
+{
+    TRISD = 0x00;       // LCD Data bus (D0-D7) as output
+    PORTD = 0x00;
+    TRISB = 0x00;       // LCD Control (RB0-RB2) & Motor (RB3-RB4) as output
+    PORTB = 0x00;
+
+    lcd_Init();
+    UART_Init();
+
+    lcd_cmd(0x80);
+    lcd_word("ENTER PASSWORD:");
+    UART_Write_Text("System Ready. Enter 4-digit Password:\r\n");
+
+    while(1)
+    {
+        lcd_cmd(0xC0);
+        lcd_word("                "); // Clear second line
+        lcd_cmd(0xC0);
+
+        // Read 4 characters from Virtual Terminal via UART
+        for(int i = 0; i < 4; i++)
+        {
+            entered_pass[i] = UART_Read_Char();
+            UART_Write_Char('*');   
+            lcd_data('*');          
+        }
+        entered_pass[4] = '\0';
+
+        UART_Write_Text("\r\nChecking...\r\n");
+        __delay_ms(500);
+
+        if(strcmp(entered_pass, correct_pass) == 0)
+        {
+            // Password Correct Unlock Safe
+            wrong_attempts = 0;
+            lcd_cmd(0x01);
+            __delay_ms(2);
+            lcd_cmd(0x80);
+            lcd_word("ACCESS GRANTED");
+            lcd_cmd(0xC0);
+            lcd_word("SAFE UNLOCKED");
+            UART_Write_Text("Access Granted. Safe Unlocked!\r\n");
+
+            // Rotate motor forward to unlock
+            MOTOR_A = 1;
+            MOTOR_B = 0;
+            __delay_ms(2000);
+            MOTOR_A = 0;
+            MOTOR_B = 0;
+
+            __delay_ms(2000);
+            lcd_cmd(0x01);
+            __delay_ms(2);
+            lcd_cmd(0x80);
+            lcd_word("ENTER PASSWORD:");
+            UART_Write_Text("\r\nEnter 4-digit Password:\r\n");
+        }
+        else
+        {
+            // Password Incorrect
+            wrong_attempts++;
+
+            if(wrong_attempts >= 3)
+            {
+                // Fail-Safe Triggered after 3 wrong attempts
+                lcd_cmd(0x01);
+                __delay_ms(2);
+                lcd_cmd(0x80);
+                lcd_word("ALERT!");
+                lcd_cmd(0xC0);
+                lcd_word("UNAUTHORISED ACC");
+                UART_Write_Text("UNAUTHORISED ACCESS! Safe Locked.\r\n");
+
+                // Rotate motor in reverse to lock the safe
+                MOTOR_A = 0;
+                MOTOR_B = 1;
+                __delay_ms(2000);
+                MOTOR_A = 0;
+                MOTOR_B = 0;
+
+                // Permanent lockdown
+                while(1);
+            }
+            else
+            {
+                lcd_cmd(0x01);
+                __delay_ms(2);
+                lcd_cmd(0x80);
+                lcd_word("WRONG PASSWORD");
+                lcd_cmd(0xC0);
+                lcd_word("TRY AGAIN");
+                UART_Write_Text("Access Denied. Try Again.\n\n");
+
+                __delay_ms(1500);
+                lcd_cmd(0x01);
+                __delay_ms(2);
+                lcd_cmd(0x80);
+                lcd_word("ENTER PASSWORD:");
+            }
+        }
+    }
+}
+
+
+void UART_Init(void)
+{
+    TRISCbits.TRISC6 = 0;   // RC6 (TX) as output
+    TRISCbits.TRISC7 = 1;   // RC7 (RX) as input
+    SPBRG = 129;            // 9600 Baud Rate @ 20 MHz 
+    TXSTA = 0x24;           // Enable Transmission, High Baud Rate mode
+    RCSTA = 0x90;           // Enable Serial Port and Continuous Reception
+}
+
+void UART_Write_Char(char data)
+{
+    while(!PIR1bits.TXIF);
+    TXREG = data;
+}
+
+void UART_Write_Text(const char *text)
+{
+    while(*text)
+    {
+        UART_Write_Char(*text++);
+    }
+}
+
+char UART_Read_Char(void)
+{
+    if(RCSTAbits.OERR)    
+    {
+        RCSTAbits.CREN = 0;
+        RCSTAbits.CREN = 1;
+    }
+    while(!PIR1bits.RCIF);
+    return RCREG;
+}
+
+// 8-Bit LCD Functions 
+void delay(unsigned int Delay)
+{
+    while(Delay--);
+}
+
+void lcd_Init(void)
+{
+    __delay_ms(20);
+    lcd_cmd(0x38);          // 8-bit mode, 2 lines, 5x7 font
+    lcd_cmd(0x06);          // Increment cursor
+    lcd_cmd(0x0C);          // Display ON, Cursor OFF
+    lcd_cmd(0x01);          // Clear display
+    __delay_ms(2);
+    lcd_cmd(0x80);
+}
+
+void lcd_cmd(unsigned char cmd)
+{
+    PORTD = cmd;
+    RS = 0;
+    RW = 0;
+    EN = 1;
+    delay(500);
+    EN = 0;
+}
+
+void lcd_data(unsigned char data)
+{
+    PORTD = data;
+    RS = 1;
+    RW = 0;
+    EN = 1;
+    delay(500);
+    EN = 0;
+}
+
+void lcd_word(const char *words)
+{
+    int i = 0;
+    while(words[i] != '\0')
+    {
+        lcd_data(words[i]);
+        i++;
+    }
+}
